@@ -70,11 +70,40 @@ static uint32_t vr(uint64_t off)
 }
 
 
-#define VRAM_MC 0x8000000000ull          // MC address of VRAM offset 0
+// The carve-out as PhxBringup reads it from MMHUB (phx-fb-mc-base / phx-fb-phys / phx-fb-size, set by read_layout);
+// the defaults are the Firebat's (6 GiB at 0x6A0000000). The Redmi Book Pro 15 2023 has 512 MiB elsewhere.
+static uint64_t VRAM_MC = 0x8000000000ull;   // MC address of VRAM offset 0
+static uint64_t FB_PA = 0x6A0000000ull;      // GCMC_VM_FB_OFFSET << 24
+static uint64_t FB_SIZE = 6ull << 30;
 #define GART_VA 0x7FFF00000000ull            // VA = GART_VA + vram offset (first 128 MiB)
 #define GART_PT 0x2400000ull             // flat PTE table (VRAM offset)
 #define GART_N 32768
-#define FB_PA 0x6A0000000ull             // GCMC_VM_FB_OFFSET << 24
+#define SCRATCH 0xF9F000ull              // VRAM offset of the page faults and aperture misses land on
+
+static int read_layout(void)
+{
+   io_service_t svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("PhxBringup"));
+   if (!svc) { fprintf(stderr, "no PhxBringup\n"); return -1; }
+   uint64_t *dst[3] = {&VRAM_MC, &FB_PA, &FB_SIZE};
+   const char *name[3] = {"phx-fb-mc-base", "phx-fb-phys", "phx-fb-size"};
+   for (int i = 0; i < 3; i++) {
+      CFStringRef k = CFStringCreateWithCString(kCFAllocatorDefault, name[i], kCFStringEncodingUTF8);
+      CFTypeRef v = IORegistryEntryCreateCFProperty(svc, k, kCFAllocatorDefault, 0);
+      int64_t n = 0;
+      if (v && CFGetTypeID(v) == CFNumberGetTypeID() && CFNumberGetValue((CFNumberRef)v, kCFNumberSInt64Type, &n) && n)
+         *dst[i] = (uint64_t)n;
+      else
+         fprintf(stderr, "no %s from PhxBringup: the Firebat's 0x%llx\n", name[i], (unsigned long long)*dst[i]);
+      if (v) CFRelease(v);
+      CFRelease(k);
+   }
+   IOObjectRelease(svc);
+   if (FB_SIZE < (uint64_t)GART_N * 4096) {   // every structure here sits inside the GART window
+      fprintf(stderr, "VRAM %llu MiB is smaller than the 128 MiB GART window\n", (unsigned long long)(FB_SIZE >> 20));
+      return -1;
+   }
+   return 0;
+}
 
 #define SEG0(o) (0x1260u + (o))
 #define SEG1(o) (0xA000u + (o))
@@ -106,9 +135,13 @@ static void gart(void)
    wr(SEG0(0x16f3), (uint32_t)((FB_PA + GART_PT) | 1)); wr(SEG0(0x16f4), (uint32_t)((FB_PA + GART_PT) >> 32));   // PDB base = physical (FB_PA + vram offset), as the Linux trace
    // system aperture / AGP / defaults exactly as the Linux trace (gfxhub_v3_0_init_system_aperture_regs)
    wr(SEG0(0x167c), 0); wr(SEG0(0x167b), 0x00ffffff); wr(SEG0(0x167a), 0);      // AGP_BASE/BOT/TOP (AGP off)
-   wr(SEG0(0x167d), 0x00200000); wr(SEG0(0x167e), 0x00205fff);                  // SYSTEM_APERTURE LOW/HIGH = VRAM MC range
-   wr(SEG0(0x15a8), 0x006a0f9f); wr(SEG0(0x15a9), 0);                           // SYSTEM_APERTURE_DEFAULT_ADDR LSB/MSB
-   wr(SEG0(0x15cb), 0x0000a23c); wr(SEG0(0x15cc), 0);                           // L2 protection fault default addr
+   // SYSTEM_APERTURE LOW/HIGH = VRAM MC range (256 KiB units: 0x200000..0x205fff on the Firebat)
+   wr(SEG0(0x167d), (uint32_t)(VRAM_MC >> 18)); wr(SEG0(0x167e), (uint32_t)((VRAM_MC + FB_SIZE - 1) >> 18));
+   // SYSTEM_APERTURE_DEFAULT_ADDR LSB/MSB (0x006a0f9f on the Firebat)
+   wr(SEG0(0x15a8), (uint32_t)((FB_PA + SCRATCH) >> 12)); wr(SEG0(0x15a9), (uint32_t)((FB_PA + SCRATCH) >> 44));
+   // L2 protection fault default addr: the same scratch page. The Linux trace's 0xa23c was its own dummy page, which
+   // under macOS is someone else's memory
+   wr(SEG0(0x15cb), (uint32_t)((FB_PA + SCRATCH) >> 12)); wr(SEG0(0x15cc), (uint32_t)((FB_PA + SCRATCH) >> 44));
    wr(SEG0(0x15c5), 0x00060000);                                                // L2_PROTECTION_FAULT_CNTL2
    wr(SEG0(0x15c4), env_on("FAULT_DEFAULT") ? 0x3ffffffc : 0x00000002);   // debug: no default-page redirect so faults are recorded                                                // L2_PROTECTION_FAULT_CNTL (fault handling on; was missing -> silent drops)
    wr(SEG0(0x15ce), 0xffffffff); wr(SEG0(0x15cf), 0x0000000f); wr(SEG0(0x15d0), 0);  // identity aperture LOW/HIGH (disabled)
@@ -739,7 +772,7 @@ static void sdma_sys_test(void)
 
 int main(int argc, char **argv)
 {
-   if (open_kext()) return 1;
+   if (open_kext() || read_layout()) return 1;
    if (argc < 2) { fprintf(stderr, "mesboot gart|mes|kiq|all\n"); return 2; }
    int all = !strcmp(argv[1], "all");
    if (getenv("MESBOOT_MC") && *getenv("MESBOOT_MC") == '1') use_mc = 1;

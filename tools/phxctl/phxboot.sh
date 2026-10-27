@@ -49,7 +49,13 @@ ioreg -l | grep -q '"phx-build"' || { [ $M2 = 1 ] && m2_fail "PhxBringup not loa
 echo "PhxAMDFB on the panel: $M2"
 touch "$MARK"; sync
 apps_only
-MC=1 CS=1 ADOPT=1 GFX=1 AG=1 bash $G/full.sh kiqsched | grep -E "^compute:|^gfx:|adopt"
+UP=$(MC=1 CS=1 ADOPT=1 GFX=1 AG=1 bash $G/full.sh kiqsched)
+grep -E "^compute:|^gfx:|adopt|^bringup5 failed" <<<"$UP"
+# the VRAM layout did not fit (no PhxBringup layout, or a console too big for the PSP ring): the GPU was never touched
+if grep -q "^bringup5 failed" <<<"$UP"; then
+    [ $M2 = 1 ] && m2_fail "bring-up refused"
+    apps_only; release; rm -f "$MARK"; exit 0
+fi
 $G/phxctl/mesboot claim
 # no BO cache flushing per submit/wait (the GPU maps system memory snooped): 41 fps window drag instead of 13, and no
 # artifacts seen (2026-10-20)

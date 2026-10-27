@@ -45,6 +45,10 @@ Measured on the reference machine — Firebat U6C, AMD Ryzen 7 7840HS / H 255, R
 
 Known bugs, architecture notes, and progress are tracked in [KNOWN_ISSUES.md](KNOWN_ISSUES.md) and [BUGS.md](BUGS.md).
 
+On this branch the bring-up (`bringup5.sh`, `mesboot`) reads each machine's VRAM layout and boot console size from the
+GPU instead of assuming the Firebat's, for Phoenix1 machines such as the Redmi Book Pro 15 2023 (`1002:15bf`, 512 MiB
+UMA, 3200×2000). That port has not booted yet.
+
 ## How it works
 
 ```mermaid

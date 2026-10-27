@@ -3,7 +3,7 @@
 # then run one mesboot step with its options from the environment (phxboot: MC=1 CS=1 ADOPT=1 GFX=1 AG=1 ... kiqsched).
 # Run as root (phxboot) or as a user with sudo. A reboot is armed for 4 minutes in case the GPU hangs the bus.
 SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
-bash ~/gpu/bringup5.sh >/dev/null 2>&1
+bash ~/gpu/bringup5.sh >/tmp/bringup5.log 2>&1 || { echo "bringup5 failed: $(tail -1 /tmp/bringup5.log)"; exit 1; }
 $SUDO bash -c "nohup shutdown -r +4 >/dev/null 2>&1 &"
 $SUDO ~/gpu/phxctl/phxctl wreg 0xDE0 1 | tail -1
 $SUDO ~/gpu/phxctl/phxctl wreg 0xA802 0 | tail -1

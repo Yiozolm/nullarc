@@ -105,11 +105,17 @@ enum {
 #define PHX_PSP_GFX_CMD_LOAD_IP_FW   6u
 #define PHX_PSP_GFX_CMD_AUTOLOAD_RLC 0x21u
 
-/* Fixed VRAM regions for firmware bring-up (absolute byte offsets, all within the 256 MiB BAR0 aperture, clear
- * of the console framebuffer [0,0xFA0000) and the ring/cmd/fence region near 17 MiB).
- * TMR (Trusted Memory Region) the PSP copies firmware into; fw_buf where the CPU stages ucode for LOAD_IP_FW. */
-#define PHX_VRAM_TMR_OFF    0x1400000ull   /* 20 MiB */
-#define PHX_VRAM_TMR_CAP    0x1000000ull   /* up to 16 MiB */
+/* Fixed VRAM regions for firmware bring-up (absolute byte offsets, all within the 256 MiB BAR0 aperture).
+ * The console framebuffer GOP lit sits at offset 0 and grows with the panel: [0,0xFA0000) at 2560x1600 (Firebat),
+ * [0,0x186A000) at 3200x2000 (Redmi Book Pro 15 2023). The PSP ring/cmd/fence go just above it (bringup5.sh picks the
+ * offset from phx-bootfb-bytes, the kext refuses one inside the console) and must end below PHX_VRAM_RING_LIMIT, where
+ * the scripts' fixed structures begin (SDMA test ring 32 MiB, GART table 36 MiB, MES queues 37 MiB).
+ * TMR (Trusted Memory Region) the PSP copies firmware into; fw_buf where the CPU stages ucode for LOAD_IP_FW.
+ * The TMR is where bringup5.sh's SETUP_TMR has always put it (128 MiB, 64 MiB long), so even a 512 MiB UMA carve-out
+ * holds every region. */
+#define PHX_VRAM_RING_LIMIT 0x2000000ull   /* 32 MiB */
+#define PHX_VRAM_TMR_OFF    0x8000000ull   /* 128 MiB */
+#define PHX_VRAM_TMR_CAP    0x4000000ull   /* up to 64 MiB */
 #define PHX_VRAM_FWBUF_OFF  0x4000000ull   /* 64 MiB */
 #define PHX_VRAM_FWBUF_SIZE 0x1000000ull   /* 16 MiB */
 

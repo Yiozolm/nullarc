@@ -1,5 +1,5 @@
 //
-//  PhxBringup.cpp — Phoenix (Radeon 780M, 1002:1900) bring-up kext, step E1.
+//  PhxBringup.cpp — Phoenix (Radeon 780M: Hawk Point 1002:1900, Phoenix1 1002:15bf) bring-up kext, step E1.
 //
 //  Publishes the service the RADV Darwin backend opens (class PhxBringup, user client type 'N48N')
 //  and answers ABI v1 selectors 0..8 with the same rules as Mesa's in-process mock kext
@@ -15,6 +15,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <libkern/OSAtomic.h>
 #include <pexpert/pexpert.h>
@@ -24,7 +25,7 @@
 
 #include "PhxNativeABI.h"
 
-#define PHX_KEXT_BUILD 34u
+#define PHX_KEXT_BUILD 35u
 
 // debug.phxbos_flush: how a client's BOs are made coherent around each submission and each completed wait.
 // 2 = clflush every line (the bring-up way), 1 = clflushopt (the same lines, pipelined), 0 = none (the GPU maps system
@@ -142,6 +143,9 @@ private:
     IOMemoryMap *doorbellMap{nullptr}; // BAR2: doorbell aperture (2 MiB)
     IOBufferMemoryDescriptor *sysBuf{nullptr}; // debug: physically contiguous system memory for GPU VM experiments
     uint64_t fbAperPhys{0}, fbAperLen{0};
+    // Bytes of VRAM the firmware console (GOP framebuffer, at offset 0) covers: rowBytes x height of the boot mode.
+    // 0 when the platform gave no console. The PSP ring must sit above it or the bring-up scribbles over the panel.
+    uint64_t bootFbBytes{0};
     // MMIO dword to write 0 to for an HDP flush (0 if the NBIO remap register was implausible).
     uint32_t hdpFlushDword{0};
     // PSP KM ring (debug selector 101): MC address once created, else 0. The GPCOM command + fence buffers
@@ -358,6 +362,17 @@ bool PhxBringup::start(IOService *provider) {
     setProperty("phx-debug", debug);
     setProperty("phx-fb-aper-phys", fbAperPhys, 64);
     setProperty("phx-fb-aper-len", fbAperLen, 64);
+    {   // the boot console: 2560x1600 on the Firebat (16 MB), 3200x2000 on the Redmi Book Pro 15 2023 (25.6 MB)
+        PE_Video v;
+        bzero(&v, sizeof(v));
+        IOPlatformExpert *pe = getPlatform();
+        if (pe && pe->getConsoleInfo(&v) == kIOReturnSuccess && v.v_baseAddr && v.v_rowBytes && v.v_height &&
+            v.v_rowBytes <= 65536 && v.v_height <= 16384)
+            bootFbBytes = static_cast<uint64_t>(v.v_rowBytes) * v.v_height;
+        setProperty("phx-bootfb-bytes", bootFbBytes, 64);
+        setProperty("phx-bootfb-width", static_cast<uint64_t>(v.v_width), 32);
+        setProperty("phx-bootfb-height", static_cast<uint64_t>(v.v_height), 32);
+    }
     IOLog("PhxBringup: service up (mmio %s, bar0 %s %llu MiB, debug %d)\n", mmio ? "mapped" : "unmapped",
           fbAper ? "mapped" : "unmapped", (unsigned long long)(fbAperLen >> 20), debug);
     hangCall = thread_call_allocate(hangTick, this);
@@ -1029,9 +1044,16 @@ IOReturn PhxBringup::pspRing(uint32_t op, uint64_t carveOffset, uint64_t out[4])
     if (op == 1) {
         if (ringMc) {
             r = kIOReturnExclusiveAccess;   // a ring is already live; destroy it first
-        } else if ((carveOffset & 0xFFF) || carveOffset + PHX_PSP_FENCE_REL + 0x1000 > PHX_VRAM_TMR_OFF ||
-                   PHX_VRAM_FWBUF_OFF + PHX_VRAM_FWBUF_SIZE > fbAperLen) {
-            r = kIOReturnBadArgument;        // ring+cmd+fence must sit below the TMR; fw_buf must fit the aperture
+        } else if ((carveOffset & 0xFFF) || carveOffset < bootFbBytes ||
+                   carveOffset + PHX_PSP_FENCE_REL + 0x1000 > PHX_VRAM_RING_LIMIT ||
+                   PHX_VRAM_FWBUF_OFF + PHX_VRAM_FWBUF_SIZE > fbAperLen ||
+                   (fbSize && PHX_VRAM_TMR_OFF + PHX_VRAM_TMR_CAP > fbSize)) {
+            // ring+cmd+fence above the live console and below the scripts' structures; fw_buf must fit the aperture
+            // and the TMR the UMA carve-out
+            r = kIOReturnBadArgument;
+            IOLog("PhxBringup: PSP ring at 0x%llx refused (console ends 0x%llx, BAR0 %llu MiB, VRAM %llu MiB)\n",
+                  (unsigned long long)carveOffset, (unsigned long long)bootFbBytes,
+                  (unsigned long long)(fbAperLen >> 20), (unsigned long long)(fbSize >> 20));
         } else {
             volatile uint32_t *ring = reinterpret_cast<volatile uint32_t *>(fbAper->getVirtualAddress() + carveOffset);
             uint32_t nonzero = 0;
